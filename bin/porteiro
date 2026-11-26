@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 import datetime
+import html
 import json
 import os
+import re
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 
 KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 if not KEY:
@@ -13,6 +17,7 @@ if not KEY:
 
 HOME = os.path.expanduser("~")
 MEM_GLOBAL = os.path.join(HOME, "MEMORIA.md")
+UA = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
 
 
 def ler_texto_curto(caminho, limite=4000):
@@ -30,7 +35,10 @@ def ler_texto_curto(caminho, limite=4000):
 
 def montar_contexto():
     cwd = os.getcwd()
-    partes = [f"Diretório atual: {cwd}", f"Data/hora local: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"]
+    partes = [
+        f"Diretório atual: {cwd}",
+        f"Data/hora local: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+    ]
 
     try:
         itens = sorted(os.listdir(cwd))[:40]
@@ -96,7 +104,13 @@ def descobrir_modelos():
             nome = m.get("name", "").replace("models/", "")
             metodos = m.get("supportedGenerationMethods", [])
             low = nome.lower()
-            if "generateContent" in metodos and "flash" in low and "tts" not in low and "image" not in low and "audio" not in low:
+            if (
+                "generateContent" in metodos
+                and "flash" in low
+                and "tts" not in low
+                and "image" not in low
+                and "audio" not in low
+            ):
                 modelos.append(nome)
         modelos.sort(key=lambda x: (0 if "lite" in x else 1, x), reverse=False)
         if modelos:
@@ -107,6 +121,63 @@ def descobrir_modelos():
 
 
 MODELS = descobrir_modelos()
+
+
+def buscar_web_direto(consulta):
+    resultados = []
+    q = urllib.parse.quote_plus(consulta)
+
+    # 1) Bing RSS (XML limpo, rápido e sem limite da API do Gemini)
+    try:
+        url = f"https://www.bing.com/search?q={q}&format=rss&mkt=pt-BR"
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            xml_data = r.read()
+        root = ET.fromstring(xml_data)
+        for item in root.findall(".//item")[:6]:
+            titulo = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            desc = (item.findtext("description") or "").strip()
+            if titulo and link:
+                resultados.append((titulo, link, desc))
+    except Exception:
+        pass
+
+    if resultados:
+        return resultados
+
+    # 2) Fallback: DuckDuckGo Lite
+    try:
+        data = urllib.parse.urlencode({"q": consulta}).encode("utf-8")
+        req = urllib.request.Request(
+            "https://lite.duckduckgo.com/lite/",
+            data=data,
+            headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            pagina = r.read().decode("utf-8", errors="replace")
+        links = re.findall(
+            r'<a[^>]+class=["\']result-link["\'][^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+            pagina,
+            flags=re.S | re.I,
+        )
+        snippets = re.findall(
+            r'<td[^>]+class=["\']result-snippet["\'][^>]*>(.*?)</td>',
+            pagina,
+            flags=re.S | re.I,
+        )
+        for i, (href, raw_t) in enumerate(links[:6]):
+            titulo = html.unescape(re.sub(r"<[^>]+>", "", raw_t)).strip()
+            desc = ""
+            if i < len(snippets):
+                desc = html.unescape(re.sub(r"<[^>]+>", "", snippets[i])).strip()
+            if titulo and href:
+                resultados.append((titulo, href, desc))
+    except Exception:
+        pass
+
+    return resultados
 
 
 def extrair_fontes(data):
@@ -124,14 +195,13 @@ def extrair_fontes(data):
     return fontes[:5]
 
 
-def perguntar(history, system_prompt, usar_web=False):
+def perguntar(history, system_prompt, usar_grounding=False):
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": history[-16:],
     }
-    if usar_web:
+    if usar_grounding:
         payload["tools"] = [{"google_search": {}}]
-        # Modelos flash completos suportam google_search melhor que lite
         ordem = sorted(MODELS, key=lambda x: (1 if "lite" in x else 0, x))
     else:
         ordem = MODELS
@@ -153,7 +223,7 @@ def perguntar(history, system_prompt, usar_web=False):
             texto = "\n".join(p.get("text", "") for p in partes if p.get("text")).strip()
             if not texto:
                 continue
-            fontes = extrair_fontes(data) if usar_web else []
+            fontes = extrair_fontes(data) if usar_grounding else []
             return texto, m, fontes
         except urllib.error.HTTPError as e:
             ultimo_erro = f"{m} ({e.code})"
@@ -164,6 +234,32 @@ def perguntar(history, system_prompt, usar_web=False):
             ultimo_erro = f"{m} ({e})"
             continue
     raise RuntimeError(f"Modelos indisponíveis agora. Último: {ultimo_erro}")
+
+
+def responder_com_web(consulta, hist, sys_prompt):
+    print(f"\n🌐 [PESQUISANDO NA WEB]: {consulta}...")
+    resultados = buscar_web_direto(consulta)
+    if resultados:
+        bloco = []
+        fontes = []
+        for idx, (titulo, link, desc) in enumerate(resultados, 1):
+            bloco.append(f"{idx}. {titulo}\n   Link: {link}\n   Resumo: {desc}")
+            fontes.append((titulo, link))
+        prompt_web = (
+            f"Resultados ao vivo da internet para '{consulta}':\n\n"
+            + "\n".join(bloco)
+            + "\n\nResponda à pergunta do usuário de forma direta em português usando esses resultados."
+        )
+        hist.append({"role": "user", "parts": [{"text": prompt_web}]})
+        reply, usado, _ = perguntar(hist, sys_prompt, usar_grounding=False)
+        hist.append({"role": "model", "parts": [{"text": reply}]})
+        return reply, usado, fontes[:5]
+
+    # Se a busca direta falhar, tenta o grounding nativo do Gemini
+    hist.append({"role": "user", "parts": [{"text": f"Pesquise na web e responda de forma direta em português: {consulta}"}]})
+    reply, usado, fontes = perguntar(hist, sys_prompt, usar_grounding=True)
+    hist.append({"role": "model", "parts": [{"text": reply}]})
+    return reply, usado, fontes
 
 
 def salvar_memoria(nota):
@@ -295,19 +391,27 @@ def main():
                     hist.pop()
             continue
 
-        forcar_web = False
         if msg.startswith("/web "):
-            forcar_web = True
-            msg = msg[5:].strip()
-            if not msg:
+            consulta = msg[5:].strip()
+            if not consulta:
                 continue
+            try:
+                reply, usado, fontes = responder_com_web(consulta, hist, sys_prompt)
+                print(f"\nPorteiro ({usado}) > {reply}")
+                if fontes:
+                    print("\nFontes:")
+                    for titulo, uri in fontes:
+                        print(f"  - {titulo}: {uri}")
+                print()
+            except Exception as e:
+                print(f"\n[Erro]: {e}\n")
+            continue
 
         hist.append({"role": "user", "parts": [{"text": msg}]})
 
         for _passo in range(3):
             try:
-                reply, usado, fontes = perguntar(hist, sys_prompt, usar_web=forcar_web)
-                forcar_web = False
+                reply, usado, fontes = perguntar(hist, sys_prompt)
             except Exception as e:
                 print(f"\n[Erro]: {e}\n")
                 if hist and hist[-1]["role"] == "user":
@@ -318,10 +422,17 @@ def main():
 
             if reply.startswith("BUSCAR_WEB:"):
                 consulta = reply.replace("BUSCAR_WEB:", "", 1).strip()
-                print(f"\n🌐 [PESQUISANDO NA WEB]: {consulta}...")
-                hist.append({"role": "user", "parts": [{"text": f"Pesquise na web agora e responda de forma direta em português: {consulta}"}]})
-                forcar_web = True
-                continue
+                try:
+                    reply_w, usado_w, fontes_w = responder_com_web(consulta, hist, sys_prompt)
+                    print(f"\nPorteiro ({usado_w}) > {reply_w}")
+                    if fontes_w:
+                        print("\nFontes:")
+                        for titulo, uri in fontes_w:
+                            print(f"  - {titulo}: {uri}")
+                    print()
+                except Exception as e:
+                    print(f"\n[Erro]: {e}\n")
+                break
 
             if reply.startswith("LER_ARQUIVO:"):
                 caminho = os.path.expanduser(reply.replace("LER_ARQUIVO:", "", 1).strip())
