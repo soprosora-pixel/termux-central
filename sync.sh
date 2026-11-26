@@ -25,5 +25,5 @@ fi
 
 echo "========================================"
 echo "CENTRAL ATUALIZADA COM SUCESSO!"
-echo "Comandos prontos: porteiro | agy | puxar"
+echo "Comandos prontos: porteiro | agy | backup | puxar"
 echo "========================================"

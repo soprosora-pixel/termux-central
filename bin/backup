@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -e
+
+REMOTE="gdrive"
+DEST="$REMOTE:Termux_Central_Backup"
+
+if ! command -v rclone >/dev/null 2>&1; then
+  echo "Erro: rclone não encontrado. Instale com: pkg install -y rclone"
+  exit 1
+fi
+
+case "${1:-}" in
+  espaco|status)
+    echo "=== ESPAÇO NO GOOGLE DRIVE ==="
+    rclone about "$REMOTE:"
+    exit 0
+    ;;
+  listar)
+    echo "=== PASTAS NO BACKUP DO DRIVE ==="
+    rclone lsd "$DEST" || echo "Pasta de backup ainda vazia. Rode: backup"
+    exit 0
+    ;;
+esac
+
+echo "========================================"
+echo "INICIANDO BACKUP PARA GOOGLE DRIVE (2TB)"
+echo "Destino: $DEST"
+echo "========================================"
+
+if [ -d "$HOME/FukFukNigthmare" ]; then
+  echo "[1/2] Sincronizando projeto FukFukNigthmare..."
+  rclone copy "$HOME/FukFukNigthmare" "$DEST/FukFukNigthmare" \
+    --exclude ".godot/**" \
+    --exclude ".git/**" \
+    --update \
+    --transfers 4 \
+    --stats 5s
+fi
+
+echo "[2/2] Salvando configurações e memórias do Termux..."
+TMP_CFG="$HOME/.cache/termux_backup_cfg"
+mkdir -p "$TMP_CFG"
+for f in "$HOME/.bashrc" "$HOME/MEMORIA.md" "$HOME/GEMINI.md"; do
+  [ -f "$f" ] && cp -f "$f" "$TMP_CFG/"
+done
+rclone copy "$TMP_CFG" "$DEST/config" --update --stats 5s
+rm -rf "$TMP_CFG"
+
+echo "========================================"
+echo "BACKUP CONCLUÍDO COM SUCESSO NO DRIVE!"
+echo "Use 'backup espaco' para ver seus 2TB."
+echo "========================================"
