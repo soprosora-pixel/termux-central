@@ -1,21 +1,90 @@
 #!/usr/bin/env python3
-import json, os, subprocess, urllib.request, urllib.error
+import datetime
+import json
+import os
+import subprocess
+import urllib.error
+import urllib.request
 
 KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 if not KEY:
     print("Erro: GEMINI_API_KEY vazia. Rode: source ~/.bashrc")
     raise SystemExit(1)
 
-SYS = (
-    "Você é o Porteiro, assistente inteligente no Termux do Abel. "
-    "Responda em português do Brasil, de forma direta e prática. "
-    "Seu objetivo é economizar tokens do agente pesado 'agy'. "
-    "Conversas, ideias, dúvidas e planejamento você resolve sozinho. "
-    "SOMENTE quando o usuário pedir para EXECUTAR uma ação real no celular/sistema "
-    "(editar arquivos, criar código, rodar comandos, mexer no jogo, subir pro GitHub), "
-    "responda EXATAMENTE neste formato:\n"
-    "CHAMAR_AGY: <instrução curta, técnica e pronta para o agy executar>"
-)
+HOME = os.path.expanduser("~")
+MEM_GLOBAL = os.path.join(HOME, "MEMORIA.md")
+
+
+def ler_texto_curto(caminho, limite=4000):
+    try:
+        if os.path.isfile(caminho):
+            with open(caminho, "r", encoding="utf-8", errors="replace") as f:
+                txt = f.read().strip()
+            if len(txt) > limite:
+                return txt[-limite:] + "\n[...truncado...]"
+            return txt
+    except Exception:
+        pass
+    return ""
+
+
+def montar_contexto():
+    cwd = os.getcwd()
+    partes = [f"Diretório atual: {cwd}", f"Data/hora local: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"]
+
+    try:
+        itens = sorted(os.listdir(cwd))[:40]
+        partes.append("Arquivos na pasta atual: " + (", ".join(itens) if itens else "(vazia)"))
+    except Exception:
+        pass
+
+    try:
+        g = subprocess.run(
+            ["git", "status", "-sb"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if g.returncode == 0 and g.stdout.strip():
+            linhas = g.stdout.strip().splitlines()[:12]
+            partes.append("Git status:\n" + "\n".join(linhas))
+    except Exception:
+        pass
+
+    mem_g = ler_texto_curto(MEM_GLOBAL, 3500)
+    if mem_g:
+        partes.append(f"--- MEMORIA.md ({MEM_GLOBAL}) ---\n{mem_g}")
+
+    for nome in ("MEMORIA.md", "GEMINI.md"):
+        local = os.path.join(cwd, nome)
+        if os.path.abspath(local) != os.path.abspath(MEM_GLOBAL):
+            txt = ler_texto_curto(local, 2500)
+            if txt:
+                partes.append(f"--- {nome} (projeto atual) ---\n{txt}")
+
+    return "\n\n".join(partes)
+
+
+def construir_system_prompt(contexto):
+    return (
+        "Você é o Porteiro v2, o agente principal no Termux Android do Abel.\n"
+        "Responda sempre em português do Brasil, de forma direta, prática e sem enrolação.\n"
+        "Seu objetivo é resolver o máximo possível sozinho com agilidade e economizar tokens do agente pesado 'agy'.\n\n"
+        "Você tem 4 AÇÕES ESPECIAIS. Quando precisar usar uma ação, responda APENAS com uma única linha no formato exato abaixo (sem texto antes ou depois):\n"
+        "1. Para executar um comando simples no Termux (ex: git status, ls, rclone, criar pasta/arquivo simples, checar sistema):\n"
+        "   RODAR_CMD: <comando shell>\n"
+        "2. Para ler o conteúdo de um arquivo local para analisar código, logs ou notas:\n"
+        "   LER_ARQUIVO: <caminho_do_arquivo>\n"
+        "3. Para pesquisar informações atualizadas na internet (docs Godot 4.3, erros recentes, APIs, notícias):\n"
+        "   BUSCAR_WEB: <consulta de pesquisa>\n"
+        "4. SOMENTE para edições pesadas de código em vários arquivos ou refatorações complexas do jogo/projeto:\n"
+        "   CHAMAR_AGY: <briefing técnico curto, cirúrgico e pronto para o agy executar>\n\n"
+        "Se for conversa, dúvida, planejamento ou resposta após receber a saída de uma ferramenta, responda normalmente em texto.\n\n"
+        "=== CONTEXTO ATUAL DO AMBIENTE ===\n"
+        + contexto
+    )
+
 
 def descobrir_modelos():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={KEY}"
@@ -26,9 +95,9 @@ def descobrir_modelos():
         for m in dados.get("models", []):
             nome = m.get("name", "").replace("models/", "")
             metodos = m.get("supportedGenerationMethods", [])
-            if "generateContent" in metodos and "flash" in nome.lower() and "tts" not in nome.lower() and "image" not in nome.lower():
+            low = nome.lower()
+            if "generateContent" in metodos and "flash" in low and "tts" not in low and "image" not in low and "audio" not in low:
                 modelos.append(nome)
-        # Prioriza modelos lite e mais recentes
         modelos.sort(key=lambda x: (0 if "lite" in x else 1, x), reverse=False)
         if modelos:
             return modelos
@@ -36,21 +105,56 @@ def descobrir_modelos():
         pass
     return ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"]
 
+
 MODELS = descobrir_modelos()
 
-def perguntar(history):
-    body = json.dumps({
-        "system_instruction": {"parts": [{"text": SYS}]},
-        "contents": history[-12:]
-    }).encode("utf-8")
+
+def extrair_fontes(data):
+    fontes = []
+    try:
+        meta = data["candidates"][0].get("groundingMetadata", {})
+        for ch in meta.get("groundingChunks", []):
+            web = ch.get("web", {})
+            uri = web.get("uri")
+            titulo = web.get("title") or uri
+            if uri and (titulo, uri) not in fontes:
+                fontes.append((titulo, uri))
+    except Exception:
+        pass
+    return fontes[:5]
+
+
+def perguntar(history, system_prompt, usar_web=False):
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": history[-16:],
+    }
+    if usar_web:
+        payload["tools"] = [{"google_search": {}}]
+        # Modelos flash completos suportam google_search melhor que lite
+        ordem = sorted(MODELS, key=lambda x: (1 if "lite" in x else 0, x))
+    else:
+        ordem = MODELS
+
+    body = json.dumps(payload).encode("utf-8")
     ultimo_erro = ""
-    for m in MODELS:
+    for m in ordem:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={KEY}"
-        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         try:
-            with urllib.request.urlopen(req, timeout=25) as r:
+            with urllib.request.urlopen(req, timeout=35) as r:
                 data = json.loads(r.read().decode("utf-8"))
-                return data["candidates"][0]["content"]["parts"][0]["text"].strip(), m
+            partes = data["candidates"][0]["content"].get("parts", [])
+            texto = "\n".join(p.get("text", "") for p in partes if p.get("text")).strip()
+            if not texto:
+                continue
+            fontes = extrair_fontes(data) if usar_web else []
+            return texto, m, fontes
         except urllib.error.HTTPError as e:
             ultimo_erro = f"{m} ({e.code})"
             if e.code in (400, 404, 429, 500, 503):
@@ -61,43 +165,214 @@ def perguntar(history):
             continue
     raise RuntimeError(f"Modelos indisponíveis agora. Último: {ultimo_erro}")
 
-hist = []
-print("=== PORTEIRO ATIVO (Auto-Descoberta) ===")
-print(f"Modelos detectados: {', '.join(MODELS[:4])}")
-print("Converse normal. Digite 'sair' para encerrar.\n")
 
-while True:
-    try:
-        msg = input("Você > ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print("\nPorteiro encerrado.")
-        break
-    if not msg:
-        continue
-    if msg.lower() in ("sair", "exit", "quit"):
-        print("Porteiro encerrado.")
-        break
+def salvar_memoria(nota):
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(MEM_GLOBAL, "a", encoding="utf-8") as f:
+        f.write(f"\n- [{ts}] {nota}\n")
 
-    hist.append({"role": "user", "parts": [{"text": msg}]})
+
+def executar_shell(cmd):
     try:
-        reply, usado = perguntar(hist)
+        res = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        out = (res.stdout or "") + (("\n[STDERR]\n" + res.stderr) if res.stderr else "")
+        out = out.strip() or "(comando executado sem saída)"
+        if len(out) > 6000:
+            out = out[:6000] + "\n[...saída truncada...]"
+        return f"Código de saída: {res.returncode}\n{out}"
+    except subprocess.TimeoutExpired:
+        return "Erro: comando excedeu o limite de 60 segundos."
     except Exception as e:
-        print(f"\n[Erro]: {e}\n")
-        hist.pop()
-        continue
+        return f"Erro ao executar comando: {e}"
 
-    hist.append({"role": "model", "parts": [{"text": reply}]})
 
-    if reply.startswith("CHAMAR_AGY:"):
-        tarefa = reply.replace("CHAMAR_AGY:", "", 1).strip()
-        print(f"\n⚡ [AÇÃO PARA O AGY] (via {usado})\nTarefa: {tarefa}\n")
-        if input("Abrir agy agora? (s/n) > ").strip().lower() == "s":
+def mostrar_ajuda():
+    print(
+        "\nComandos rápidos do Porteiro v2:\n"
+        "  /web <pergunta>   - Pesquisa na internet em tempo real com fontes\n"
+        "  /lembrar <nota>   - Salva uma anotação permanente no ~/MEMORIA.md\n"
+        "  /memoria          - Mostra suas últimas memórias salvas\n"
+        "  /ler <arquivo>    - Lê um arquivo e coloca na conversa\n"
+        "  /cmd <comando>    - Roda um comando e envia a saída pro Porteiro\n"
+        "  /contexto         - Atualiza leitura da pasta e da memória\n"
+        "  /limpar           - Limpa o histórico da conversa atual\n"
+        "  sair              - Encerra o Porteiro\n"
+    )
+
+
+def main():
+    contexto = montar_contexto()
+    sys_prompt = construir_system_prompt(contexto)
+    hist = []
+
+    print("=== PORTEIRO v2 ATIVO (Memória + Web + Execução) ===")
+    print(f"Pasta: {os.getcwd()}")
+    print(f"Modelos: {', '.join(MODELS[:4])}")
+    print(f"Memória: {'carregada' if os.path.isfile(MEM_GLOBAL) else 'nova (use /lembrar)'}")
+    print("Digite '/ajuda' para ver os comandos ou 'sair' para encerrar.\n")
+
+    while True:
+        try:
+            msg = input("Você > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nPorteiro encerrado.")
+            break
+
+        if not msg:
+            continue
+        low = msg.lower()
+        if low in ("sair", "exit", "quit"):
+            print("Porteiro encerrado.")
+            break
+
+        if low == "/ajuda":
+            mostrar_ajuda()
+            continue
+
+        if low == "/limpar":
+            hist.clear()
+            print("Histórico limpo.\n")
+            continue
+
+        if low == "/contexto":
+            contexto = montar_contexto()
+            sys_prompt = construir_system_prompt(contexto)
+            print("Contexto da pasta e memória atualizado.\n")
+            continue
+
+        if low == "/memoria":
+            txt = ler_texto_curto(MEM_GLOBAL, 2500)
+            print("\n" + (txt if txt else "MEMORIA.md ainda vazio. Use: /lembrar <nota>") + "\n")
+            continue
+
+        if msg.startswith("/lembrar "):
+            nota = msg[9:].strip()
+            if nota:
+                salvar_memoria(nota)
+                contexto = montar_contexto()
+                sys_prompt = construir_system_prompt(contexto)
+                print("Salvo em ~/MEMORIA.md e carregado no contexto.\n")
+            continue
+
+        if msg.startswith("/ler "):
+            caminho = os.path.expanduser(msg[5:].strip())
+            conteudo = ler_texto_curto(caminho, 10000)
+            if not conteudo:
+                print(f"Arquivo não encontrado ou vazio: {caminho}\n")
+                continue
+            print(f"Arquivo '{caminho}' carregado ({len(conteudo)} caracteres).\n")
+            hist.append({
+                "role": "user",
+                "parts": [{"text": f"Conteúdo do arquivo '{caminho}':\n```\n{conteudo}\n```\nAnalise brevemente e aguarde minha próxima instrução."}],
+            })
             try:
-                subprocess.run(["termux-clipboard-set"], input=tarefa.encode("utf-8"), check=False)
-                print("Tarefa copiada! Só colar no agy.")
-            except Exception:
-                pass
-            subprocess.run(["agy"])
-            print("\n=== De volta ao Porteiro ===\n")
-    else:
-        print(f"\nPorteiro ({usado}) > {reply}\n")
+                reply, usado, _ = perguntar(hist, sys_prompt)
+                hist.append({"role": "model", "parts": [{"text": reply}]})
+                print(f"Porteiro ({usado}) > {reply}\n")
+            except Exception as e:
+                print(f"[Erro]: {e}\n")
+                hist.pop()
+            continue
+
+        if msg.startswith("/cmd "):
+            cmd = msg[5:].strip()
+            if cmd:
+                saida = executar_shell(cmd)
+                print(f"\n[SAÍDA]\n{saida}\n")
+                hist.append({"role": "user", "parts": [{"text": f"Rodei o comando `{cmd}` e a saída foi:\n{saida}\nResuma o resultado de forma prática."}]})
+                try:
+                    reply, usado, _ = perguntar(hist, sys_prompt)
+                    hist.append({"role": "model", "parts": [{"text": reply}]})
+                    print(f"Porteiro ({usado}) > {reply}\n")
+                except Exception as e:
+                    print(f"[Erro]: {e}\n")
+                    hist.pop()
+            continue
+
+        forcar_web = False
+        if msg.startswith("/web "):
+            forcar_web = True
+            msg = msg[5:].strip()
+            if not msg:
+                continue
+
+        hist.append({"role": "user", "parts": [{"text": msg}]})
+
+        for _passo in range(3):
+            try:
+                reply, usado, fontes = perguntar(hist, sys_prompt, usar_web=forcar_web)
+                forcar_web = False
+            except Exception as e:
+                print(f"\n[Erro]: {e}\n")
+                if hist and hist[-1]["role"] == "user":
+                    hist.pop()
+                break
+
+            hist.append({"role": "model", "parts": [{"text": reply}]})
+
+            if reply.startswith("BUSCAR_WEB:"):
+                consulta = reply.replace("BUSCAR_WEB:", "", 1).strip()
+                print(f"\n🌐 [PESQUISANDO NA WEB]: {consulta}...")
+                hist.append({"role": "user", "parts": [{"text": f"Pesquise na web agora e responda de forma direta em português: {consulta}"}]})
+                forcar_web = True
+                continue
+
+            if reply.startswith("LER_ARQUIVO:"):
+                caminho = os.path.expanduser(reply.replace("LER_ARQUIVO:", "", 1).strip())
+                print(f"\n📖 [LENDO ARQUIVO]: {caminho}")
+                conteudo = ler_texto_curto(caminho, 10000)
+                resultado = conteudo if conteudo else f"Arquivo não encontrado ou vazio: {caminho}"
+                hist.append({"role": "user", "parts": [{"text": f"Resultado da leitura de '{caminho}':\n{resultado}\nAgora responda ao pedido original."}]})
+                continue
+
+            if reply.startswith("RODAR_CMD:"):
+                cmd = reply.replace("RODAR_CMD:", "", 1).strip()
+                print(f"\n🛠️  [COMANDO NO TERMUX] (via {usado})\nComando: {cmd}")
+                try:
+                    conf = input("Executar agora? (s/n) > ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    conf = "n"
+                if conf == "s":
+                    saida = executar_shell(cmd)
+                    print(f"\n[SAÍDA]\n{saida}\n")
+                    hist.append({"role": "user", "parts": [{"text": f"Saída do comando `{cmd}`:\n{saida}\nExplique o resultado de forma curta e prática."}]})
+                    continue
+                else:
+                    print("Execução cancelada.\n")
+                    hist.append({"role": "user", "parts": [{"text": "O usuário cancelou a execução desse comando."}]})
+                    break
+
+            if reply.startswith("CHAMAR_AGY:"):
+                tarefa = reply.replace("CHAMAR_AGY:", "", 1).strip()
+                print(f"\n⚡ [AÇÃO PESADA PARA O AGY] (via {usado})\nBriefing: {tarefa}\n")
+                try:
+                    conf = input("Abrir agy agora? (s/n) > ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    conf = "n"
+                if conf == "s":
+                    try:
+                        subprocess.run(["termux-clipboard-set"], input=tarefa.encode("utf-8"), check=False)
+                        print("Briefing copiado! Só colar no agy.")
+                    except Exception:
+                        pass
+                    subprocess.run(["agy"])
+                    print("\n=== De volta ao Porteiro v2 ===\n")
+                break
+
+            print(f"\nPorteiro ({usado}) > {reply}")
+            if fontes:
+                print("\nFontes:")
+                for titulo, uri in fontes:
+                    print(f"  - {titulo}: {uri}")
+            print()
+            break
+
+
+if __name__ == "__main__":
+    main()

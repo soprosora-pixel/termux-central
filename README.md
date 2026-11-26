@@ -4,6 +4,6 @@ Ponte de scripts entre o Gemini (via Composio) e o Termux.
 
 ## Comandos
 - `puxar` — baixa e instala automaticamente as atualizações enviadas pelo Gemini.
-- `porteiro` — chat econômico com descoberta automática de modelos Flash.
-- `agy` — agente pesado para execução de tarefas.
-- `backup` — envia projeto, memórias e configurações para a pasta `Termux_Central_Backup` no Google Drive (`backup espaco` mostra uso dos 2TB; `backup listar` lista backups).
+- `porteiro` — agente inteligente v2 com memória automática (`~/MEMORIA.md`), leitura de pasta/Git, busca na web em tempo real (`/web`), leitura de arquivos (`/ler`), execução direta de comandos com aprovação e repasse de tarefas pesadas para o `agy`.
+- `agy` — agente pesado para execução de código complexo em múltiplos arquivos.
+- `backup` — envia projeto, memórias e configurações para a pasta `Termux_Central_Backup` no Google Drive (`backup espaco` mostra uso; `backup listar` lista backups).
