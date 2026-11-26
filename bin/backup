@@ -23,7 +23,7 @@ case "${1:-}" in
 esac
 
 echo "========================================"
-echo "INICIANDO BACKUP PARA GOOGLE DRIVE (2TB)"
+echo "INICIANDO BACKUP PARA GOOGLE DRIVE"
 echo "Destino: $DEST"
 echo "========================================"
 
@@ -34,7 +34,7 @@ if [ -d "$HOME/FukFukNigthmare" ]; then
     --exclude ".git/**" \
     --update \
     --transfers 4 \
-    --stats 5s
+    --progress
 fi
 
 echo "[2/2] Salvando configurações e memórias do Termux..."
@@ -43,10 +43,10 @@ mkdir -p "$TMP_CFG"
 for f in "$HOME/.bashrc" "$HOME/MEMORIA.md" "$HOME/GEMINI.md"; do
   [ -f "$f" ] && cp -f "$f" "$TMP_CFG/"
 done
-rclone copy "$TMP_CFG" "$DEST/config" --update --stats 5s
+rclone copy "$TMP_CFG" "$DEST/config" --update --progress
 rm -rf "$TMP_CFG"
 
 echo "========================================"
 echo "BACKUP CONCLUÍDO COM SUCESSO NO DRIVE!"
-echo "Use 'backup espaco' para ver seus 2TB."
+echo "Use 'backup espaco' para ver seu espaço."
 echo "========================================"
