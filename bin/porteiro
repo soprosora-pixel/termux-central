@@ -86,14 +86,14 @@ def montar_contexto():
 def construir_system_prompt(contexto):
     return (
         "Você é o Porteiro v2, o agente principal no Termux Android do Abel.\n"
-        "Responda sempre em português do Brasil, de forma direta, prática e sem enrolação.\n"
+        "Responda sempre em português, de forma direta, prática e sem enrolação.\n"
         "Seu objetivo é resolver o máximo possível sozinho com agilidade e economizar tokens do agente pesado 'agy'.\n\n"
         "Você tem 4 AÇÕES ESPECIAIS. Quando precisar usar uma ação, responda APENAS com uma única linha no formato exato abaixo (sem texto antes ou depois):\n"
         "1. Para executar um comando simples no Termux (ex: git status, ls, rclone, criar pasta/arquivo simples, checar sistema):\n"
         "   RODAR_CMD: <comando shell>\n"
         "2. Para ler o conteúdo de um arquivo local para analisar código, logs ou notas:\n"
         "   LER_ARQUIVO: <caminho_do_arquivo>\n"
-        "3. Para pesquisar informações atualizadas na internet (docs Godot 4.3, erros recentes, APIs, notícias):\n"
+        "3. Para pesquisar informações atualizadas na internet (docs Godot, erros recentes, APIs, notícias):\n"
         "   BUSCAR_WEB: <consulta de pesquisa curta com palavras-chave>\n"
         "4. SOMENTE para edições pesadas de código em vários arquivos ou refatorações complexas do jogo/projeto:\n"
         "   CHAMAR_AGY: <briefing técnico curto, cirúrgico e pronto para o agy executar>\n\n"
@@ -101,6 +101,17 @@ def construir_system_prompt(contexto):
         "=== CONTEXTO ATUAL DO AMBIENTE ===\n"
         + contexto
     )
+
+
+def chave_ordenacao_modelo(nome, preferir_lite=True):
+    low = nome.lower()
+    m = re.search(r"gemini-(\d+)\.(\d+)", low)
+    ver = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    is_lite = 1 if "lite" in low else 0
+    is_preview = 1 if ("preview" in low or "exp" in low) else 0
+    lite_rank = (0 if is_lite else 1) if preferir_lite else (1 if is_lite else 0)
+    # Ordena: preferência lite/full, versão mais nova primeiro, estável antes de preview
+    return (lite_rank, -ver[0], -ver[1], is_preview, nome)
 
 
 def descobrir_modelos():
@@ -119,14 +130,16 @@ def descobrir_modelos():
                 and "tts" not in low
                 and "image" not in low
                 and "audio" not in low
+                and "live" not in low
+                and "thinking" not in low
             ):
                 modelos.append(nome)
-        modelos.sort(key=lambda x: (0 if "lite" in x else 1, x), reverse=False)
+        modelos.sort(key=lambda x: chave_ordenacao_modelo(x, preferir_lite=True))
         if modelos:
             return modelos
     except Exception:
         pass
-    return ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"]
+    return ["gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
 
 MODELS = descobrir_modelos()
@@ -146,104 +159,17 @@ def preparar_consulta(consulta):
     return consulta_otimizada, [sem_acentos(p).lower() for p in chave]
 
 
-def limpar_link_ddg(href):
-    href = html.unescape(href)
-    if href.startswith("//"):
-        href = "https:" + href
-    parsed = urllib.parse.urlparse(href)
-    qs = urllib.parse.parse_qs(parsed.query)
-    if "uddg" in qs and qs["uddg"]:
-        return qs["uddg"][0]
-    return href
-
-
 def resultados_relevantes(resultados, keywords):
     if not resultados:
         return False
     if not keywords:
         return True
     texto_total = sem_acentos(" ".join(f"{t} {d}" for t, _, d in resultados)).lower()
-    # Garante que a palavra mais específica (geralmente a última ou maior, como 'godot') apareça
     alvo = keywords[-1]
     if alvo in texto_total:
         return True
     acertos = sum(1 for k in keywords if k in texto_total)
     return acertos >= max(1, len(keywords) // 2)
-
-
-def buscar_ddg_html(consulta_q):
-    resultados = []
-    try:
-        data = urllib.parse.urlencode({"q": consulta_q}).encode("utf-8")
-        req = urllib.request.Request(
-            "https://html.duckduckgo.com/html/",
-            data=data,
-            headers={
-                "User-Agent": UA,
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15) as r:
-            pagina = r.read().decode("utf-8", errors="replace")
-        links = re.findall(
-            r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-            pagina,
-            flags=re.S | re.I,
-        )
-        snippets = re.findall(
-            r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>|<div[^>]+class="result__snippet"[^>]*>(.*?)</div>',
-            pagina,
-            flags=re.S | re.I,
-        )
-        for i, (href, raw_t) in enumerate(links[:6]):
-            titulo = html.unescape(re.sub(r"<[^>]+>", "", raw_t)).strip()
-            link = limpar_link_ddg(href)
-            desc = ""
-            if i < len(snippets):
-                raw_s = snippets[i][0] or snippets[i][1]
-                desc = html.unescape(re.sub(r"<[^>]+>", "", raw_s)).strip()
-            if titulo and link.startswith("http"):
-                resultados.append((titulo, link, desc))
-    except Exception:
-        pass
-    return resultados
-
-
-def buscar_ddg_lite(consulta_q):
-    resultados = []
-    try:
-        data = urllib.parse.urlencode({"q": consulta_q}).encode("utf-8")
-        req = urllib.request.Request(
-            "https://lite.duckduckgo.com/lite/",
-            data=data,
-            headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15) as r:
-            pagina = r.read().decode("utf-8", errors="replace")
-        links = re.findall(
-            r'<a[^>]+class=["\']result-link["\'][^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
-            pagina,
-            flags=re.S | re.I,
-        )
-        snippets = re.findall(
-            r'<td[^>]+class=["\']result-snippet["\'][^>]*>(.*?)</td>',
-            pagina,
-            flags=re.S | re.I,
-        )
-        for i, (href, raw_t) in enumerate(links[:6]):
-            titulo = html.unescape(re.sub(r"<[^>]+>", "", raw_t)).strip()
-            link = limpar_link_ddg(href)
-            desc = ""
-            if i < len(snippets):
-                desc = html.unescape(re.sub(r"<[^>]+>", "", snippets[i])).strip()
-            if titulo and link.startswith("http"):
-                resultados.append((titulo, link, desc))
-    except Exception:
-        pass
-    return resultados
 
 
 def buscar_bing_rss(consulta_q):
@@ -252,7 +178,7 @@ def buscar_bing_rss(consulta_q):
         q = urllib.parse.quote_plus(sem_acentos(consulta_q))
         url = f"https://www.bing.com/search?q={q}&format=rss"
         req = urllib.request.Request(url, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=12) as r:
             xml_data = r.read()
         root = ET.fromstring(xml_data)
         for item in root.findall(".//item")[:6]:
@@ -266,13 +192,77 @@ def buscar_bing_rss(consulta_q):
     return resultados
 
 
+def buscar_wikipedia(consulta_q, lang="en"):
+    resultados = []
+    try:
+        q = urllib.parse.quote_plus(consulta_q)
+        url = f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch={q}&srlimit=4&format=json&utf8=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "PorteiroTermux/2.0 (Android)"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            dados = json.loads(r.read().decode("utf-8"))
+        for item in dados.get("query", {}).get("search", []):
+            titulo = item.get("title", "").strip()
+            snippet = html.unescape(re.sub(r"<[^>]+>", "", item.get("snippet", ""))).strip()
+            link = f"https://{lang}.wikipedia.org/wiki/{urllib.parse.quote(titulo.replace(' ', '_'))}"
+            if titulo:
+                resultados.append((f"{titulo} (Wikipedia {lang.upper()})", link, snippet))
+    except Exception:
+        pass
+    return resultados
+
+
+def buscar_ddg_api(consulta_q):
+    resultados = []
+    try:
+        q = urllib.parse.quote_plus(consulta_q)
+        url = f"https://api.duckduckgo.com/?q={q}&format=json&no_html=1&skip_disambig=1"
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            dados = json.loads(r.read().decode("utf-8"))
+        if dados.get("AbstractText") and dados.get("AbstractURL"):
+            resultados.append((
+                dados.get("Heading") or consulta_q,
+                dados["AbstractURL"],
+                dados["AbstractText"],
+            ))
+        for topic in dados.get("RelatedTopics", [])[:4]:
+            if isinstance(topic, dict) and topic.get("Text") and topic.get("FirstURL"):
+                resultados.append((topic["Text"][:80], topic["FirstURL"], topic["Text"]))
+    except Exception:
+        pass
+    return resultados
+
+
 def buscar_web_direto(consulta):
     consulta_q, keywords = preparar_consulta(consulta)
-    for buscador in (buscar_ddg_html, buscar_ddg_lite, buscar_bing_rss):
-        res = buscador(consulta_q)
-        if resultados_relevantes(res, keywords):
-            return res
-    return []
+    combinados = []
+
+    res_bing = buscar_bing_rss(consulta_q)
+    if resultados_relevantes(res_bing, keywords):
+        combinados.extend(res_bing)
+
+    if len(combinados) < 3:
+        res_ddg = buscar_ddg_api(consulta_q)
+        if resultados_relevantes(res_ddg, keywords):
+            combinados.extend(res_ddg)
+
+    if len(combinados) < 3:
+        alvo = keywords[-1] if keywords else consulta_q
+        for lang in ("pt", "en"):
+            res_wiki = buscar_wikipedia(consulta_q, lang=lang)
+            if not resultados_relevantes(res_wiki, keywords) and alvo != consulta_q:
+                res_wiki = buscar_wikipedia(alvo, lang=lang)
+            if resultados_relevantes(res_wiki, keywords):
+                combinados.extend(res_wiki)
+                break
+
+    vistos = set()
+    unicos = []
+    for item in combinados:
+        if item[1] not in vistos:
+            vistos.add(item[1])
+            unicos.append(item)
+    return unicos[:5]
 
 
 def extrair_fontes(data):
@@ -297,7 +287,7 @@ def perguntar(history, system_prompt, usar_grounding=False):
     }
     if usar_grounding:
         payload["tools"] = [{"google_search": {}}]
-        ordem = sorted(MODELS, key=lambda x: (1 if "lite" in x else 0, x))
+        ordem = sorted(MODELS, key=lambda x: chave_ordenacao_modelo(x, preferir_lite=False))
     else:
         ordem = MODELS
 
@@ -346,14 +336,28 @@ def responder_com_web(consulta, hist, sys_prompt):
             + "\n\nResponda à pergunta do usuário de forma direta em português usando esses resultados."
         )
         hist.append({"role": "user", "parts": [{"text": prompt_web}]})
-        reply, usado, _ = perguntar(hist, sys_prompt, usar_grounding=False)
-        hist.append({"role": "model", "parts": [{"text": reply}]})
-        return reply, usado, fontes[:5]
+        try:
+            reply, usado, _ = perguntar(hist, sys_prompt, usar_grounding=False)
+            hist.append({"role": "model", "parts": [{"text": reply}]})
+            return reply, usado, fontes[:5]
+        except Exception:
+            hist.pop()
+            raise
 
-    hist.append({"role": "user", "parts": [{"text": f"Pesquise na web e responda de forma direta em português: {consulta}"}]})
-    reply, usado, fontes = perguntar(hist, sys_prompt, usar_grounding=True)
-    hist.append({"role": "model", "parts": [{"text": reply}]})
-    return reply, usado, fontes
+    # Tenta grounding nativo; se falhar (cota/404), responde com conhecimento do modelo sem quebrar
+    hist.append({"role": "user", "parts": [{"text": f"Responda de forma direta em português: {consulta}"}]})
+    try:
+        reply, usado, fontes = perguntar(hist, sys_prompt, usar_grounding=True)
+        hist.append({"role": "model", "parts": [{"text": reply}]})
+        return reply, usado, fontes
+    except Exception:
+        try:
+            reply, usado, _ = perguntar(hist, sys_prompt, usar_grounding=False)
+            hist.append({"role": "model", "parts": [{"text": reply}]})
+            return f"(Sem resultados web ao vivo agora — resposta do modelo)\n{reply}", usado, []
+        except Exception:
+            hist.pop()
+            raise
 
 
 def salvar_memoria(nota):
