@@ -9,7 +9,6 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
 
 KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 if not KEY:
@@ -143,30 +142,34 @@ def sem_acentos(texto):
 
 
 def preparar_consulta(consulta):
-    # Força contexto técnico se for sobre Godot
     lc = consulta.lower()
-    if "godot" in lc and "engine" not in lc:
-        consulta = "Godot Engine " + consulta
-
+    if "godot" in lc and "godotengine" not in lc:
+        consulta = "site:godotengine.org " + consulta
     limpa = re.sub(r"[?!\"'()\[\]{}]+", " ", consulta).strip()
     return limpa, [sem_acentos(p).lower() for p in limpa.split() if len(p) > 2]
 
 
-def buscar_bing_rss(consulta_q):
+def buscar_ddg_api(consulta_q):
     resultados = []
     try:
-        q = urllib.parse.quote_plus(sem_acentos(consulta_q))
-        url = f"https://www.bing.com/search?q={q}&format=rss"
+        q = urllib.parse.quote_plus(consulta_q)
+        url = f"https://api.duckduckgo.com/?q={q}&format=json&no_html=1&skip_disambig=1"
         req = urllib.request.Request(url, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=12) as r:
-            xml_data = r.read()
-        root = ET.fromstring(xml_data)
-        for item in root.findall(".//item")[:6]:
-            titulo = (item.findtext("title") or "").strip()
-            link = (item.findtext("link") or "").strip()
-            desc = (item.findtext("description") or "").strip()
-            if titulo and link:
-                resultados.append((titulo, link, desc))
+            dados = json.loads(r.read().decode("utf-8"))
+        if dados.get("AbstractText") and dados.get("AbstractURL"):
+            url_abs = dados["AbstractURL"]
+            if not any(bad in url_abs for bad in ("mail.google.com", "accounts.google.com")):
+                resultados.append((
+                    dados.get("Heading") or consulta_q,
+                    url_abs,
+                    dados["AbstractText"],
+                ))
+        for topic in dados.get("RelatedTopics", [])[:5]:
+            if isinstance(topic, dict) and topic.get("Text") and topic.get("FirstURL"):
+                url_t = topic["FirstURL"]
+                if not any(bad in url_t for bad in ("mail.google.com", "accounts.google.com")):
+                    resultados.append((topic["Text"][:80], url_t, topic["Text"]))
     except Exception:
         pass
     return resultados
@@ -195,9 +198,9 @@ def buscar_web_direto(consulta):
     consulta_q, _ = preparar_consulta(consulta)
     combinados = []
 
-    res_bing = buscar_bing_rss(consulta_q)
-    if res_bing:
-        combinados.extend(res_bing)
+    res_ddg = buscar_ddg_api(consulta_q)
+    if res_ddg:
+        combinados.extend(res_ddg)
 
     if len(combinados) < 3:
         for lang in ("en", "pt"):
@@ -208,7 +211,7 @@ def buscar_web_direto(consulta):
     vistos = set()
     unicos = []
     for item in combinados:
-        if item[1] not in vistos:
+        if item[1] not in vistos and not any(b in item[1] for b in ("mail.google.com", "accounts.google.com")):
             vistos.add(item[1])
             unicos.append(item)
     return unicos[:5]
@@ -222,7 +225,7 @@ def extrair_fontes(data):
             web = ch.get("web", {})
             uri = web.get("uri")
             titulo = web.get("title") or uri
-            if uri and (titulo, uri) not in fontes:
+            if uri and not any(b in uri for b in ("mail.google.com", "accounts.google.com")) and (titulo, uri) not in fontes:
                 fontes.append((titulo, uri))
     except Exception:
         pass
@@ -326,7 +329,7 @@ def executar_shell(cmd):
         out = (res.stdout or "") + (("\n[STDERR]\n" + res.stderr) if res.stderr else "")
         out = out.strip() or "(comando executado sem saída)"
         if len(out) > 6000:
-            out = out[:6000] + "\n[...saída truncada...]"
+            out = out[:6000] + "\n[...truncado...]"
         return f"Código de saída: {res.returncode}\n{out}"
     except subprocess.TimeoutExpired:
         return "Erro: comando excedeu o limite de 60 segundos."
@@ -490,7 +493,7 @@ def main():
 
             if reply.startswith("RODAR_CMD:"):
                 cmd = reply.replace("RODAR_CMD:", "", 1).strip()
-                print(f"\n🛠️  [COMANDO NO TERMux] (via {usado})\nComando: {cmd}")
+                print(f"\n🛠️  [COMANDO NO TERMUX] (via {usado})\nComando: {cmd}")
                 try:
                     conf = input("Executar agora? (s/n) > ").strip().lower()
                 except (EOFError, KeyboardInterrupt):
@@ -531,5 +534,7 @@ def main():
             break
 
 
+if __name__ == "__main__":
+    new_version = "4.3"
 if __name__ == "__main__":
     main()
