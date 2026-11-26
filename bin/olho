@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Script para tirar fotos usando a câmara do telemóvel via Termux:API
+
+SAIDA="${1:-$HOME/storage/shared/DCIM/Camera/termux_foto_$(date +%Y%m%d_%H%M%S).jpg}"
+
+if command -v termux-camera-photo &> /dev/null; then
+    echo "A tirar foto com a câmara..."
+    termux-camera-photo "$SAIDA"
+    echo "Foto guardada com sucesso em: $SAIDA"
+else
+    echo "Erro: termux-api não está instalado. Instale com: pkg install termux-api"
+    exit 1
+fi

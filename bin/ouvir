@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Script para gravar áudio do ambiente via Termux:API
+
+TEMPO_SEGUNDOS="${1:-10}"
+SAIDA="${2:-$HOME/gravacao_$(date +%Y%m%d_%H%M%S).m4a}"
+
+if command -v termux-microphone-record &> /dev/null; then
+    echo "A gravar áudio durante $TEMPO_SEGUNDOS segundos..."
+    termux-microphone-record -f "$SAIDA" -l "$TEMPO_SEGUNDOS"
+    echo "Gravação concluída! Ficheiro guardado em: $SAIDA"
+else
+    echo "Erro: termux-api não está instalado."
+    exit 1
+fi

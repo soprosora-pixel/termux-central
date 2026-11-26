@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Script para criar um túnel web seguro via Cloudflare (cloudflared)
+
+PORTA="${1:-8080}"
+
+if command -v cloudflared &> /dev/null; then
+    echo "A iniciar túnel seguro do Cloudflare para a porta $PORTA..."
+    cloudflared tunnel --url "http://localhost:$PORTA"
+else
+    echo "Erro: cloudflared não está instalado. Instale ou configure no Termux."
+    exit 1
+fi

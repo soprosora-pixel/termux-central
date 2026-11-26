@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Script para lançar aplicações Android diretamente pelo terminal via am (Activity Manager)
+
+APP_NOME="$1"
+
+if [ -z "$APP_NOME" ]; then
+    echo "Uso: abrir <youtube|godot|browser|whatsapp|config>"
+    exit 1
+fi
+
+case "$APP_NOME" in
+    youtube)
+        am start -n com.google.android.youtube/com.google.android.youtube.HomeActivity
+        ;;
+    browser|chrome)
+        am start -n com.android.chrome/com.google.android.apps.chrome.Main
+        ;;
+    whatsapp)
+        am start -n com.whatsapp/.Main
+        ;;
+    settings|config)
+        am start -a android.settings.SETTINGS
+        ;;
+    *)
+        echo "A tentar abrir o pacote: $APP_NOME"
+        am start --user 0 -p "$APP_NOME" 2>/dev/null || echo "Aplicação não encontrada."
+        ;;
+esac
