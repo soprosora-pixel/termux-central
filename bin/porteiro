@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+import json, os, subprocess, urllib.request, urllib.error
+
+KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+if not KEY:
+    print("Erro: GEMINI_API_KEY vazia. Rode: source ~/.bashrc")
+    raise SystemExit(1)
+
+SYS = (
+    "Você é o Porteiro, assistente inteligente no Termux do Abel. "
+    "Responda em português do Brasil, de forma direta e prática. "
+    "Seu objetivo é economizar tokens do agente pesado 'agy'. "
+    "Conversas, ideias, dúvidas e planejamento você resolve sozinho. "
+    "SOMENTE quando o usuário pedir para EXECUTAR uma ação real no celular/sistema "
+    "(editar arquivos, criar código, rodar comandos, mexer no jogo, subir pro GitHub), "
+    "responda EXATAMENTE neste formato:\n"
+    "CHAMAR_AGY: <instrução curta, técnica e pronta para o agy executar>"
+)
+
+def descobrir_modelos():
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={KEY}"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            dados = json.loads(r.read().decode("utf-8"))
+        modelos = []
+        for m in dados.get("models", []):
+            nome = m.get("name", "").replace("models/", "")
+            metodos = m.get("supportedGenerationMethods", [])
+            if "generateContent" in metodos and "flash" in nome.lower() and "tts" not in nome.lower() and "image" not in nome.lower():
+                modelos.append(nome)
+        # Prioriza modelos lite e mais recentes
+        modelos.sort(key=lambda x: (0 if "lite" in x else 1, x), reverse=False)
+        if modelos:
+            return modelos
+    except Exception:
+        pass
+    return ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"]
+
+MODELS = descobrir_modelos()
+
+def perguntar(history):
+    body = json.dumps({
+        "system_instruction": {"parts": [{"text": SYS}]},
+        "contents": history[-12:]
+    }).encode("utf-8")
+    ultimo_erro = ""
+    for m in MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={KEY}"
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=25) as r:
+                data = json.loads(r.read().decode("utf-8"))
+                return data["candidates"][0]["content"]["parts"][0]["text"].strip(), m
+        except urllib.error.HTTPError as e:
+            ultimo_erro = f"{m} ({e.code})"
+            if e.code in (400, 404, 429, 500, 503):
+                continue
+            raise
+        except Exception as e:
+            ultimo_erro = f"{m} ({e})"
+            continue
+    raise RuntimeError(f"Modelos indisponíveis agora. Último: {ultimo_erro}")
+
+hist = []
+print("=== PORTEIRO ATIVO (Auto-Descoberta) ===")
+print(f"Modelos detectados: {', '.join(MODELS[:4])}")
+print("Converse normal. Digite 'sair' para encerrar.\n")
+
+while True:
+    try:
+        msg = input("Você > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nPorteiro encerrado.")
+        break
+    if not msg:
+        continue
+    if msg.lower() in ("sair", "exit", "quit"):
+        print("Porteiro encerrado.")
+        break
+
+    hist.append({"role": "user", "parts": [{"text": msg}]})
+    try:
+        reply, usado = perguntar(hist)
+    except Exception as e:
+        print(f"\n[Erro]: {e}\n")
+        hist.pop()
+        continue
+
+    hist.append({"role": "model", "parts": [{"text": reply}]})
+
+    if reply.startswith("CHAMAR_AGY:"):
+        tarefa = reply.replace("CHAMAR_AGY:", "", 1).strip()
+        print(f"\n⚡ [AÇÃO PARA O AGY] (via {usado})\nTarefa: {tarefa}\n")
+        if input("Abrir agy agora? (s/n) > ").strip().lower() == "s":
+            try:
+                subprocess.run(["termux-clipboard-set"], input=tarefa.encode("utf-8"), check=False)
+                print("Tarefa copiada! Só colar no agy.")
+            except Exception:
+                pass
+            subprocess.run(["agy"])
+            print("\n=== De volta ao Porteiro ===\n")
+    else:
+        print(f"\nPorteiro ({usado}) > {reply}\n")
