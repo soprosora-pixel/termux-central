@@ -20,14 +20,6 @@ HOME = os.path.expanduser("~")
 MEM_GLOBAL = os.path.join(HOME, "MEMORIA.md")
 UA = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
 
-STOPWORDS = {
-    "a", "o", "as", "os", "um", "uma", "uns", "umas", "de", "do", "da", "dos", "das",
-    "em", "no", "na", "nos", "nas", "por", "para", "com", "sem", "sob", "sobre",
-    "que", "qual", "quais", "como", "onde", "quando", "quem", "porque", "se",
-    "e", "ou", "mas", "mais", "menos", "muito", "esta", "este", "essa", "esse",
-    "the", "is", "are", "what", "which", "how", "of", "in", "to", "for", "and",
-}
-
 
 def ler_texto_curto(caminho, limite=4000):
     try:
@@ -110,7 +102,6 @@ def chave_ordenacao_modelo(nome, preferir_lite=True):
     is_lite = 1 if "lite" in low else 0
     is_preview = 1 if ("preview" in low or "exp" in low) else 0
     lite_rank = (0 if is_lite else 1) if preferir_lite else (1 if is_lite else 0)
-    # Ordena: preferência lite/full, versão mais nova primeiro, estável antes de preview
     return (lite_rank, -ver[0], -ver[1], is_preview, nome)
 
 
@@ -139,7 +130,7 @@ def descobrir_modelos():
             return modelos
     except Exception:
         pass
-    return ["gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    return ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
 
 MODELS = descobrir_modelos()
@@ -152,24 +143,13 @@ def sem_acentos(texto):
 
 
 def preparar_consulta(consulta):
+    # Força contexto técnico se for sobre Godot
+    lc = consulta.lower()
+    if "godot" in lc and "engine" not in lc:
+        consulta = "Godot Engine " + consulta
+
     limpa = re.sub(r"[?!\"'()\[\]{}]+", " ", consulta).strip()
-    palavras = [p for p in re.split(r"\s+", limpa) if p]
-    chave = [p for p in palavras if sem_acentos(p).lower() not in STOPWORDS and len(p) > 1]
-    consulta_otimizada = " ".join(chave) if chave else limpa
-    return consulta_otimizada, [sem_acentos(p).lower() for p in chave]
-
-
-def resultados_relevantes(resultados, keywords):
-    if not resultados:
-        return False
-    if not keywords:
-        return True
-    texto_total = sem_acentos(" ".join(f"{t} {d}" for t, _, d in resultados)).lower()
-    alvo = keywords[-1]
-    if alvo in texto_total:
-        return True
-    acertos = sum(1 for k in keywords if k in texto_total)
-    return acertos >= max(1, len(keywords) // 2)
+    return limpa, [sem_acentos(p).lower() for p in limpa.split() if len(p) > 2]
 
 
 def buscar_bing_rss(consulta_q):
@@ -197,7 +177,7 @@ def buscar_wikipedia(consulta_q, lang="en"):
     try:
         q = urllib.parse.quote_plus(consulta_q)
         url = f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch={q}&srlimit=4&format=json&utf8=1"
-        req = urllib.request.Request(url, headers={"User-Agent": "PorteiroTermux/2.0 (Android)"})
+        req = urllib.request.Request(url, headers={"User-Agent": "PorteiroTermux/2.0"})
         with urllib.request.urlopen(req, timeout=12) as r:
             dados = json.loads(r.read().decode("utf-8"))
         for item in dados.get("query", {}).get("search", []):
@@ -211,50 +191,19 @@ def buscar_wikipedia(consulta_q, lang="en"):
     return resultados
 
 
-def buscar_ddg_api(consulta_q):
-    resultados = []
-    try:
-        q = urllib.parse.quote_plus(consulta_q)
-        url = f"https://api.duckduckgo.com/?q={q}&format=json&no_html=1&skip_disambig=1"
-        req = urllib.request.Request(url, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=12) as r:
-            dados = json.loads(r.read().decode("utf-8"))
-        if dados.get("AbstractText") and dados.get("AbstractURL"):
-            resultados.append((
-                dados.get("Heading") or consulta_q,
-                dados["AbstractURL"],
-                dados["AbstractText"],
-            ))
-        for topic in dados.get("RelatedTopics", [])[:4]:
-            if isinstance(topic, dict) and topic.get("Text") and topic.get("FirstURL"):
-                resultados.append((topic["Text"][:80], topic["FirstURL"], topic["Text"]))
-    except Exception:
-        pass
-    return resultados
-
-
 def buscar_web_direto(consulta):
-    consulta_q, keywords = preparar_consulta(consulta)
+    consulta_q, _ = preparar_consulta(consulta)
     combinados = []
 
     res_bing = buscar_bing_rss(consulta_q)
-    if resultados_relevantes(res_bing, keywords):
+    if res_bing:
         combinados.extend(res_bing)
 
     if len(combinados) < 3:
-        res_ddg = buscar_ddg_api(consulta_q)
-        if resultados_relevantes(res_ddg, keywords):
-            combinados.extend(res_ddg)
-
-    if len(combinados) < 3:
-        alvo = keywords[-1] if keywords else consulta_q
-        for lang in ("pt", "en"):
+        for lang in ("en", "pt"):
             res_wiki = buscar_wikipedia(consulta_q, lang=lang)
-            if not resultados_relevantes(res_wiki, keywords) and alvo != consulta_q:
-                res_wiki = buscar_wikipedia(alvo, lang=lang)
-            if resultados_relevantes(res_wiki, keywords):
+            if res_wiki:
                 combinados.extend(res_wiki)
-                break
 
     vistos = set()
     unicos = []
@@ -344,7 +293,6 @@ def responder_com_web(consulta, hist, sys_prompt):
             hist.pop()
             raise
 
-    # Tenta grounding nativo; se falhar (cota/404), responde com conhecimento do modelo sem quebrar
     hist.append({"role": "user", "parts": [{"text": f"Responda de forma direta em português: {consulta}"}]})
     try:
         reply, usado, fontes = perguntar(hist, sys_prompt, usar_grounding=True)
@@ -542,7 +490,7 @@ def main():
 
             if reply.startswith("RODAR_CMD:"):
                 cmd = reply.replace("RODAR_CMD:", "", 1).strip()
-                print(f"\n🛠️  [COMANDO NO TERMUX] (via {usado})\nComando: {cmd}")
+                print(f"\n🛠️  [COMANDO NO TERMux] (via {usado})\nComando: {cmd}")
                 try:
                     conf = input("Executar agora? (s/n) > ").strip().lower()
                 except (EOFError, KeyboardInterrupt):
